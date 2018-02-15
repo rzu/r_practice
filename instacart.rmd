@@ -1,0 +1,314 @@
+---
+title: "Association rules analysis. Instacart dataset"
+author: "Team Stauffer. MMA2018S"
+output: html_document
+---
+
+This R-Markdown file is supposed to walk the reader through our analysis steps. The analysis was done completely in R.
+
+### Load all the necessary libraries
+
+```{r eval=FALSE}
+library(data.table)
+library(dplyr)
+library(rmarkdown)
+library(arules)
+library(arulesViz)
+library(ggplot2)
+library(arulesSequences) # If we decide to run some sequence analyses as well
+```
+
+### Load all the data locally
+Initially the data processing was done on Spark, but due to the necessity of using VPN and complicating the processing pipeline (the data are not too big to be processed locally), we decided to load and process everything locally (execution time would not exceed 15 seconds). 
+
+We look at the structure of each table as well. We will check for missing data later.
+
+```{r eval=FALSE}
+aisles       <- read.csv("input/aisles.csv", header = TRUE, sep = ",")
+deps         <- read.csv("input/departments.csv", header = TRUE, sep = ",")
+orders       <- read.csv("input/orders.csv", header = TRUE, sep = ",")
+prods        <- read.csv("input/products.csv", header = TRUE, sep = ",")
+order_prods  <- read.csv("input/order_products__train.csv", header = TRUE, sep = ",")
+
+glimpse(aisles)
+glimpse(deps)
+glimpse(orders)
+glimpse(prods)
+glimpse(order_prods)
+```
+
+### Join the data
+The data are stored in a relational database structure, so we join the necessary tables.
+Overall we have:
+
+* 3,421,083 total orders
+* 131,209 orders that have a list of product IDs purchased (this is our main table, to which we will join others)
+* Tables with departments, aisles and product dictionaries
+
+We also add departments and aisles to product names for a more advanced post-arules filtering
+
+```{r eval=FALSE}
+joined = order_prods %>%
+  left_join(orders, by='order_id') %>%
+  left_join(prods, by='product_id') %>%
+  left_join(deps, by='department_id') %>%
+  left_join(aisles, by='aisle_id') %>%
+  mutate(products = paste('product=', product_name, '&dep=', department, '&aisle=', aisle, sep = ''))
+```
+
+### Check missing values for each variable
+There are no missing values. Moving on.
+
+```{r eval=FALSE}
+sapply(joined, function(x) sum(is.na(x)))
+```
+
+### Get frequencies of departments, aisles and products
+Let's look at frequencies of departments and aisles, as well as the most frequently purchased products.
+
+```{r eval=FALSE}
+freq_dep = joined %>%
+  group_by(department) %>%
+  summarize(n_prods = n(), n_trans = n_distinct(order_id))
+
+freq_aisles = joined %>%
+  group_by(aisle) %>%
+  summarize(n_prods = n(), n_trans = n_distinct(order_id))
+
+freq_prods = joined %>%
+  group_by(product_name) %>%
+  summarize(n_trans = n())
+```
+
+### Write them to files for ease of access and Tableau
+```{r eval=FALSE}
+write.csv(freq_aisles, "output/freq_aisles.csv")
+write.csv(freq_dep, "output/freq_deps.csv")
+write.csv(freq_prods, "output/freq_prods.csv")
+```
+
+### Filter out products that appear in less than 10 transactions
+If we look at the list of frequently purchased products, we have a very long tail (approx. 65% of all products) of products that appear in less than 10 transactions. This number (10) is set arbitrarily. It could be much higher without influencing the results to our objective. We will leave it at 10.
+
+We also select only fields that are necessary for running association rules:
+
+* order_id
+* products
+
+```{r eval=FALSE}
+ready = joined %>%
+  group_by(product_id) %>%
+  mutate(n = n()) %>%
+  ungroup() %>%
+  filter(n > 10) %>%
+  mutate(products = paste('product=', product_name, '&dep=', department, '&aisle=', aisle, sep = '')) %>%
+  select(order_id, products)
+
+ready_po = joined %>%
+  group_by(product_id) %>%
+  mutate(n = n()) %>%
+  ungroup() %>%
+  filter(n > 10) %>%
+  select(order_id, product_name)
+```
+
+### Plot frequencies of departments and aisles
+Save the plots to files, for future access. Plot and save most frequent products as well.
+
+```{r eval=FALSE}
+# Get the top 20 aisles by frequency
+top_aisles = freq_aisles %>%
+  arrange(desc(n_trans)) %>%
+  slice(1:20)
+
+top_prods = freq_prods %>%
+  arrange(desc(n_trans)) %>%
+  slice(1:20)
+
+options(scipen=10000) # This is to fix the scientific conversion of axis ticks
+
+# Plot the barcharts
+plot_deps = ggplot(freq_dep, aes(x=reorder(department, n_trans), y=n_trans, fill=department)) + coord_flip() + geom_bar(stat = 'identity') + ylab('number of transactions') + xlab('department')
+plot_aisles = ggplot(top_aisles, aes(x=reorder(aisle, n_trans), y=n_trans, fill=aisle)) + coord_flip() + geom_bar(stat = 'identity') + ylab('number of transactions') + xlab('aisle')
+plot_prods = ggplot(top_prods, aes(x=reorder(product_name, n_trans), y=n_trans, fill=product_name)) + coord_flip() + geom_bar(stat = 'identity') + ylab('number of transactions') + xlab('product')
+
+# Save the plots to files
+ggsave("output/freq_deps.jpg", plot = plot_deps, width = 10, height = 5, units = "in", dpi = 300)
+ggsave("output/freq_aisles.jpg", plot = plot_aisles, width = 10, height = 5, units = "in", dpi = 300)
+ggsave("output/freq_prods.jpg", plot = plot_prods, width = 10, height = 5, units = "in", dpi = 300)
+```
+
+##### Frequent departments
+![](output/freq_deps.jpg)
+
+##### Frequent aisles
+![](output/freq_aisles.jpg)
+
+##### Frequent products
+![](output/freq_prods.jpg)
+
+### Count distinct orders and products
+As evident here, after we remove the long tail, the number of products is reduced from ~40000 to 13377 (**l33t** :D).
+However, the number of transactions is almost the same.
+
+```{r eval=FALSE}
+ready %>% select(products) %>% n_distinct()
+ready %>% select(order_id) %>% n_distinct()
+```
+
+### Write our input file for arules
+Write all the transactions to file, so that we can just read it in, without running data-wrangling every time.
+
+```{r eval=FALSE}
+write.csv(ready, "tmp/transactions.csv")
+write.csv(ready_po, "tmp/transactions_po.csv")
+```
+
+### Read that .csv back in as "transactions" class
+Here we read our transactions in the format used by the **arules** package.
+
+```{r eval=FALSE}
+tns <- read.transactions(
+  file = "tmp/transactions.csv",
+  format = "single",
+  sep = ",",
+  cols=c("order_id","products"),
+  rm.duplicates = T
+)
+
+tns_po <- read.transactions(
+  file = "tmp/transactions_po.csv",
+  format = "single",
+  sep = ",",
+  cols=c("order_id","product_name"),
+  rm.duplicates = T
+)
+
+summary(tns) # Are we ready for arules?
+```
+
+### Run apriori to generate a list of rules on the full dataset
+Some parameters explained:
+
+* minlen indicates that at least one element is in lhs and one in rhs, i.e. rules with empty lhs are discarded
+* Setting low thresholds for support and confidence, since the number of transactions is large and interest measures are therefore diluted
+
+```{r eval=FALSE}
+rules <- apriori(tns, parameter = list(supp = 0.001, conf = 0.1, target = "rules", minlen = 2))
+rules_po <- apriori(tns_po, parameter = list(supp = 0.001, conf = 0.1, target = "rules", minlen = 2))
+```
+
+Total number of rules: **2548**
+
+Optional subsets of 1-to-1 itemsets, 2-to-1 and 3-to-1. This is useful to see the depth of associations. Can be done either by running apriori again or using subset functions with size(lhs) == x).
+
+```{r eval=FALSE}
+rules_minmax2 <- apriori(tns, parameter = list(supp = 0.001, conf = 0.1, target = "rules", minlen = 2, maxlen=2))
+rules_minlen3 <- apriori(tns, parameter = list(supp = 0.001, conf = 0.1, target = "rules", minlen = 3))
+rules_minlen4 <- apriori(tns, parameter = list(supp = 0.001, conf = 0.1, target = "rules", minlen = 4))
+```
+
+Number of rules for each of lhs combinations (possibly a few redundant rules present):
+
+* 1-to-1: **1490**
+* 2-to-1: **1058**
+* 3-to-1: **20**
+
+### Remove redundant and duplicate rules
+Here we delete some rules we don't need. The following is a definition of redundant rules [source](https://rdrr.io/cran/arules/man/is.redundant.html):
+
+> A rule is redundant if a more general rule with the same or a higher confidence exists. That is, a more specific rule is redundant if it is only equally or even less predictive than a more general rule. A rule is more general if it has the same RHS but one or more items removed from the LHS.
+
+```{r eval=FALSE}
+rules <- rules[!is.redundant(rules)] # remove redundant rules, i.e. when a more general rule is found
+rules <- rules[size(lhs(rules)) != 0] # Remove rules with empty lhs, fixable with apriori parameter minlen = 2
+length(rules) # Check number of rules left
+```
+
+Total number of rules left: **2480**
+
+### Add Chi-square and associated p-value to the rules
+This is another interest measure to determine which rules are "significant".
+
+```{r eval=FALSE}
+quality(rules)$pvalue <- interestMeasure(rules, measure='chi', significance = T, tns)
+quality(rules)$chi    <- interestMeasure(rules, measure='chi', tns)
+```
+
+### User-specific associations
+We thought about possibly exploring associations for specific users. This can potentially have a big impact on basket size. Unofortunately, we only have 1 transaction per 1 user, so no patterns can be mined.
+
+```{r eval=FALSE}
+n_distinct(joined$order_id)
+n_distinct(joined$user_id)
+```
+
+### Use the interactive tool to sort and filter rules
+This allows us to set boundaries on variables, search for specific LHS and RHS and sort in ascending or descending order by each interest measure.
+
+```{r eval=FALSE}
+inspectDT(rules)
+```
+
+### Plot as a network graph
+We have a lot of extra info in our rules (department, aisle), so we rerun apriori on products only to properly visualize this network graph of top rules.
+
+```{r eval=FALSE}
+subrules <- subset(rules_po, subset=lift > 4)
+plot(subrules, method="graph", measure="lift", control=list(cex=.8)) # Built-in graph
+plot(subrules, method="graph", engine="htmlwidget") # visNetwork graph
+plot(subrules, method="paracoord") # Parallel coordinates plot
+```
+
+### Subset rules that contain organic products
+Number of rules containing at least one 'Organic' product on either lhs or rhs: **1732** or approx. 70% of all rules
+
+Total count of organic products out of all products in our transaction set: **2103** or approx. 16% of all products
+
+```{r eval=FALSE}
+orgrules = subset(rules_po, subset = lhs %pin% 'Organic')
+summary(orgrules)
+
+ready_po %>%
+  filter(grepl('Organic', product_name)) %>%
+  summarize(n = n_distinct(product_name))
+```
+
+### Other stuff
+We do most of our exploration with inspectDT() function, which is interactive and allows for fast filtering, so subsetting is not really necessary.
+
+```{r eval=FALSE}
+# Take a subset of rules
+# subrules = subset(rules, subset=lhs %pin% "dep=produce" & rhs %pin% "dep=produce")
+# inspect(head(sr))
+# srdf = as(subrules, 'data.frame')
+
+# Remove inverse rules with smaller confidence [if converted to data.frame]
+# There are often rules with "flipped" lhs and rhs, same lift and different confidence
+# We remove one of the two with lower confidence to clean up the output
+# for (i in 1:(length(srdf$rules)-1)) {
+#   n = i + 1
+#   lhs_rhs = unlist(strsplit(as.character(srdf$rules[i]), ' => '))
+#   lhs_rhs_next = unlist(strsplit(as.character(srdf$rules[n]), ' => '))
+#   if (i != length(srdf$rules)) {
+#     if (lhs_rhs[1] == lhs_rhs_next[2] & srdf$count[i] == srdf$count[n]) {
+#       if (srdf$confidence[i] > srdf$confidence[n]) { r = n } else { r = i }
+#       srdf = srdf[-r,]
+#     }
+#   }
+# }
+
+# Inspect the rules by different statistics - using the interactive tool instead
+# inspect(head(rules, n=50, by = "support"))
+# inspect(head(rules, n=50, by = "confidence"))
+# inspect(head(rules, n=50, by = "lift"))
+```
+
+### Example plots
+```{r eval=FALSE}
+plot(subrules)
+```
+
+```{r eval=FALSE}
+plotly_arules(rules) # This is cool and interactive
+```
