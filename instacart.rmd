@@ -1,6 +1,6 @@
 ---
 title: "Association rules analysis. Instacart dataset"
-author: "Team Stauffer. MMA2018S"
+author: "Roman Zubarev"
 output: html_document
 ---
 
